@@ -1,5 +1,6 @@
 import glob
 import json
+import io
 import logging
 import os
 import random
@@ -14,6 +15,7 @@ import torch
 import webdataset as wds
 from lightning_fabric.utilities.rank_zero import _get_rank
 from PIL import Image
+import torchvision.transforms as T
 from torch.utils.data import Dataset, get_worker_info
 from tqdm import tqdm
 from webdataset.tariterators import (
@@ -251,6 +253,105 @@ class LDMImagenetWebdataset(wds.DataPipeline):
 
     def __len__(self):
         return self.num_samples
+
+
+class IndexedTarDataset(Dataset):
+    def __init__(
+        self,
+        imagenet_tar,
+        imagenet_index,
+        transform=None,
+        target_transform=None,
+    ):
+        self.transform = transform
+        self.target_transform = target_transform
+
+        # Tar setup
+        self.imagenet_tar = imagenet_tar
+        self.imagenet_index = imagenet_index
+        with open(self.imagenet_index, "r") as fp:
+            self.index = json.load(fp)
+        self.index = sorted(self.index, key=lambda d: d["name"].split("/")[-1])
+        self.id_to_handle = {}
+
+        # Label setup
+        self._is_val_split = (
+            len(self.index) > 0 and self.index[0]["name"].startswith("ILSVRC2012_val_")
+        )
+        self._val_label_by_name = None
+        self._wnid_to_idx = None
+
+        dataset_dir = Path(self.imagenet_index).parent
+        class_index_path = dataset_dir / "imagenet_class_index.json"
+        if class_index_path.exists():
+            with open(class_index_path, "r") as f:
+                imagenet_class_index = json.load(f)
+            # Build wnid -> class_idx mapping
+            self._wnid_to_idx = {
+                values[0]: int(class_idx) for class_idx, values in imagenet_class_index.items()
+            }
+
+        if self._is_val_split:
+            # Try common filenames for val ground truth labels
+            gt_paths = [
+                dataset_dir / "imagenet_validation_ground_truth.txt",
+                dataset_dir / "ILSVRC2012_validation_ground_truth.txt",
+            ]
+            gt_path = next((p for p in gt_paths if p.exists()), None)
+            if gt_path is not None:
+                with open(gt_path, "r") as f:
+                    labels = [int(line.strip()) - 1 for line in f if line.strip()]
+                # Map base filename (without extension) to label
+                sorted_names = [Path(entry["name"]).stem for entry in self.index]
+                if len(labels) >= len(sorted_names):
+                    self._val_label_by_name = {
+                        name: labels[i] for i, name in enumerate(sorted_names)
+                    }
+
+    def __len__(self):
+        return len(self.index)
+
+    def get_image(self, image_info):
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+
+        if worker_id not in self.id_to_handle:
+            self.id_to_handle[worker_id] = open(self.imagenet_tar, "rb")
+        handle = self.id_to_handle[worker_id]
+
+        handle.seek(image_info["offset"])
+        img_bytes = handle.read(image_info["size"])
+        image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        image.load()
+
+        # Determine label
+        label = None
+        name = image_info["name"]
+        if self._is_val_split:
+            # Always return a dummy label for validation split
+            label = 0
+        else:
+            # Train split: infer from wnid in path (e.g., n01440764.tar/...)
+            if "/" in name:
+                first_segment = name.split("/")[0]
+                wnid = first_segment.split(".")[0]  # strip optional .tar
+                if self._wnid_to_idx is not None and wnid in self._wnid_to_idx:
+                    label = self._wnid_to_idx[wnid]
+
+        return image, label
+
+    def preprocess_image(self, image_info):
+        image, label = self.get_image(image_info)
+        if self.transform is not None:
+            image = self.transform(image)
+        if self.target_transform is not None and label is not None:
+            label = self.target_transform(label)
+        return image, label
+
+    def __getitem__(self, i):
+        image, label = self.preprocess_image(self.index[i])
+        # Return a tuple so existing 'from_tuple' collate builds a dict with keys [image, label]
+        return image, label
 
 
 def get_dataset_size(shards):
