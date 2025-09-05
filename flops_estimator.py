@@ -318,12 +318,28 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
     rin_total = 0
     # Aggregates for detailed breakdown (do not include in total calculation)
     ca_total = 0
+    ca_retriever_total = 0
+    ca_writer_total = 0
     ca_cond_total = 0
     sa_total_all = 0
     mlp_total_all = 0
+    # Attention component breakdown accumulators
+    att_component_keys = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "logits",
+        "softmax",
+        "score_times_v",
+        "out_proj",
+    )
+    retriever_cross_att_details = {k: 0 for k in att_component_keys}
+    writer_cross_att_details = {k: 0 for k in att_component_keys}
+    self_att_details = {k: 0 for k in att_component_keys}
+    cond_cross_att_details = {k: 0 for k in att_component_keys}
     for _ in range(num_blocks):
         # Retriever CA: latents attend to data
-        ca1, _ = _flops_attention(
+        ca1, bd_ca1 = _flops_attention(
             q_len=z_len,
             kv_len=num_patches,
             dim_q=latents_dim,
@@ -331,13 +347,15 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
             num_heads=read_write_heads,
             attention_dim=min(latents_dim, data_dim),
         )
+        for k in att_component_keys:
+            retriever_cross_att_details[k] += bd_ca1[k]
         total_params += _params_attention(latents_dim, data_dim, min(latents_dim, data_dim), latents_dim)
         mlp1, _ = _flops_mlp(z_len, latents_dim, latent_mlp_multiplier, gated=False)
         total_params += _params_mlp(latents_dim, latent_mlp_multiplier)
 
         # (Optional) Cond CA inside RINBlockCond: latents attend to cond tokens
         if use_cond_rin_block and cond_len > 0:
-            ca_cond, _ = _flops_attention(
+            ca_cond, bd_ca_cond = _flops_attention(
                 q_len=z_len,
                 kv_len=cond_len,
                 dim_q=latents_dim,
@@ -345,6 +363,8 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
                 num_heads=read_write_heads,
                 attention_dim=latents_dim,
             )
+            for k in att_component_keys:
+                cond_cross_att_details[k] += bd_ca_cond[k]
             total_params += _params_attention(latents_dim, latents_dim, latents_dim, latents_dim)
         else:
             ca_cond = 0
@@ -353,7 +373,7 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
         sa_total = 0
         mlp_sa_total = 0
         for _pl in range(num_processing_layers):
-            sa, _ = _flops_attention(
+            sa, bd_sa = _flops_attention(
                 q_len=z_len,
                 kv_len=z_len,
                 dim_q=latents_dim,
@@ -361,6 +381,8 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
                 num_heads=compute_heads,
                 attention_dim=latents_dim,
             )
+            for k in att_component_keys:
+                self_att_details[k] += bd_sa[k]
             total_params += _params_attention(latents_dim, latents_dim, latents_dim, latents_dim)
             sa_total += sa
             mlp_sa, _ = _flops_mlp(z_len, latents_dim, latent_mlp_multiplier, gated=False)
@@ -368,7 +390,7 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
             total_params += _params_mlp(latents_dim, latent_mlp_multiplier)
 
         # Writer CA: data attends to latents
-        ca2, _ = _flops_attention(
+        ca2, bd_ca2 = _flops_attention(
             q_len=num_patches,
             kv_len=z_len,
             dim_q=data_dim,
@@ -376,6 +398,8 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
             num_heads=read_write_heads,
             attention_dim=min(latents_dim, data_dim),
         )
+        for k in att_component_keys:
+            writer_cross_att_details[k] += bd_ca2[k]
         total_params += _params_attention(data_dim, latents_dim, min(latents_dim, data_dim), data_dim)
         mlp2, _ = _flops_mlp(num_patches, data_dim, data_mlp_multiplier, gated=False)
         total_params += _params_mlp(data_dim, data_mlp_multiplier)
@@ -383,6 +407,8 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
         rin_total += ca1 + mlp1 + ca_cond + sa_total + mlp_sa_total + ca2 + mlp2
         # Update aggregates
         ca_total += ca1 + ca2
+        ca_retriever_total += ca1
+        ca_writer_total += ca2
         ca_cond_total += ca_cond
         sa_total_all += sa_total
         mlp_total_all += (mlp1 + mlp_sa_total + mlp2)
@@ -397,10 +423,20 @@ def estimate_flops(params: Dict) -> Dict[str, int]:
     breakdown["tokens_to_patches"] = _flops_linear(num_patches, data_dim, out_patch_dim)
     total_params += _params_linear(data_dim, out_patch_dim)
 
-    total = sum(breakdown.values())
+    # Add detailed attention component breakdowns (not included in total)
+    breakdown["retriever_cross_attention_flops"] = retriever_cross_att_details
+    breakdown["self_attention_flops"] = self_att_details
+    breakdown["writer_cross_attention_flops"] = writer_cross_att_details
+    if ca_cond_total > 0:
+        breakdown["cond_cross_attention_flops"] = cond_cross_att_details
+
+    # Only sum numeric values for total
+    total = sum(v for v in breakdown.values() if isinstance(v, (int, float)))
     breakdown["total"] = total
     # Add aggregate categories for reporting (not included in total)
     breakdown["cross_attention"] = ca_total
+    breakdown["retriever_cross_attention"] = ca_retriever_total
+    breakdown["writer_cross_attention"] = ca_writer_total
     breakdown["cond_cross_attention"] = ca_cond_total
     breakdown["self_attention"] = sa_total_all
     breakdown["mlp"] = mlp_total_all
@@ -444,6 +480,17 @@ if __name__ == "__main__":
     print(f"FLOPs estimate per sample ({title}) [GFLOPs]:")
     for key, value in flops_breakdown.items():
         if key in ("total", "params_total"):
+            continue
+        # If this is a per-component FLOPs dict, print its summary first
+        if isinstance(value, dict) and key.endswith("_flops"):
+            base_key = key[:-6]
+            if base_key in flops_breakdown and isinstance(flops_breakdown[base_key], (int, float)):
+                print(f"  {base_key}: {flops_breakdown[base_key]/1e9:.3f}")
+            for subk, subv in value.items():
+                print(f"    {subk}: {subv/1e9:.3f}")
+            continue
+        # Skip numeric summaries that have a corresponding *_flops dict (already printed above)
+        if isinstance(value, (int, float)) and (key + "_flops") in flops_breakdown:
             continue
         print(f"  {key}: {value/1e9:.3f}")
     print(f"Total: {flops_breakdown['total']/1e9:.3f}")
