@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=viscam
 #SBATCH --partition=viscam
-#SBATCH --gres=gpu:a40:8
+#SBATCH --gres=gpu:a6000:4
 #SBATCH --time=2880
 #SBATCH --cpus-per-task=64
 #SBATCH --job-name=rin
@@ -17,6 +17,6 @@ echo "working directory = "$SLURM_SUBMIT_DIR
 
 source .venv/bin/activate
 
-srun python cad/train.py overrides=imagenet_64_rin computer.devices=8 logger.offline=False logger.project=RIN
+python cad/train.py overrides=imagenet_64_rin experiment_name_suffix=hf computer=cluster-node-a6000 logger.offline=False logger.project=RIN
 
 exit 0

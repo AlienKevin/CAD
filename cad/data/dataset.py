@@ -15,6 +15,7 @@ import torch
 import webdataset as wds
 from lightning_fabric.utilities.rank_zero import _get_rank
 from PIL import Image
+from datasets import load_dataset
 import torchvision.transforms as T
 from torch.utils.data import Dataset, get_worker_info
 from tqdm import tqdm
@@ -351,6 +352,35 @@ class IndexedTarDataset(Dataset):
     def __getitem__(self, i):
         image, label = self.preprocess_image(self.index[i])
         # Return a tuple so existing 'from_tuple' collate builds a dict with keys [image, label]
+        return image, label
+
+
+class HFImageNet64(Dataset):
+    def __init__(
+        self,
+        split="train",
+        transform=None,
+        target_transform=None,
+        hf_repo_id="benjamin-paine/imagenet-1k-64x64",
+        cache_dir=None,
+    ):
+        self.transform = transform
+        self.target_transform = target_transform
+        self.split = split
+        self.hf_repo_id = hf_repo_id
+        self.dataset = load_dataset(hf_repo_id, split=split, cache_dir=cache_dir)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        sample = self.dataset[idx]
+        image = sample["image"]
+        label = int(sample["label"]) if "label" in sample else None
+        if self.transform is not None:
+            image = self.transform(image)
+        if self.target_transform is not None and label is not None:
+            label = self.target_transform(label)
         return image, label
 
 

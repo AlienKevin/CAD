@@ -2,7 +2,7 @@
 
 defaults:
   - override /model: class_cond
-  - override /data/dataset: imagenet_tar
+  - override /data/dataset: imagenet_hf
   - override /data/train_aug: center_crop
   - override /data/val_aug: center_crop
   - override /model/train_noise_scheduler: linear
