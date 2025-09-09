@@ -16,6 +16,7 @@ setup(
         "transformers",
         "diffusers",
         "huggingface_hub>=0.23",
+        "datasets",
     ],
     packages=["cad"],
     package_data={"cad": ["**/*"]},
