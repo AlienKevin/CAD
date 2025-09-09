@@ -39,31 +39,52 @@ class ImageDataModule(L.LightningDataModule):
         self.val_aug = self.val_dataset.transform
 
     def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
+        loader_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+        if self.num_workers and self.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = 4
+        return DataLoader(
+            self.train_dataset,
+            **loader_kwargs,
             # collate_fn=collate_to_dict(["image", "label"]),
         )
 
     def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
+        loader_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+        if self.num_workers and self.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = 4
+        return DataLoader(
+            self.val_dataset,
+            **loader_kwargs,
         )
 
     def test_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
+        loader_kwargs = dict(
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             collate_fn=self.collate_fn,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+        if self.num_workers and self.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = 4
+        return DataLoader(
+            self.val_dataset,
+            **loader_kwargs,
         )
 
 
